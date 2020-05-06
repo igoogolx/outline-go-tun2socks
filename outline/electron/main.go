@@ -18,6 +18,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/signal"
 	"strings"
@@ -25,11 +26,11 @@ import (
 	"time"
 
 	oss "github.com/Jigsaw-Code/outline-go-tun2socks/outline/shadowsocks"
-	"github.com/Jigsaw-Code/outline-go-tun2socks/shadowsocks"
 	"github.com/eycorsican/go-tun2socks/common/log"
 	_ "github.com/eycorsican/go-tun2socks/common/log/simple" // Register a simple logger.
 	"github.com/eycorsican/go-tun2socks/core"
 	"github.com/eycorsican/go-tun2socks/proxy/dnsfallback"
+	"github.com/eycorsican/go-tun2socks/proxy/socks"
 	"github.com/eycorsican/go-tun2socks/tun"
 )
 
@@ -47,8 +48,6 @@ var args struct {
 	tunDNS            *string
 	proxyHost         *string
 	proxyPort         *int
-	proxyPassword     *string
-	proxyCipher       *string
 	logLevel          *string
 	checkConnectivity *bool
 	dnsFallback       *bool
@@ -65,8 +64,6 @@ func main() {
 	args.tunName = flag.String("tunName", "tun0", "TUN interface name")
 	args.proxyHost = flag.String("proxyHost", "", "Shadowsocks proxy hostname or IP address")
 	args.proxyPort = flag.Int("proxyPort", 0, "Shadowsocks proxy port number")
-	args.proxyPassword = flag.String("proxyPassword", "", "Shadowsocks proxy password")
-	args.proxyCipher = flag.String("proxyCipher", "chacha20-ietf-poly1305", "Shadowsocks proxy encryption cipher")
 	args.logLevel = flag.String("logLevel", "info", "Logging level: debug|info|warn|error|none")
 	args.dnsFallback = flag.Bool("dnsFallback", false, "Enable DNS fallback over TCP (overrides the UDP handler).")
 	args.checkConnectivity = flag.Bool("checkConnectivity", false, "Check the proxy TCP and UDP connectivity and exit.")
@@ -88,22 +85,23 @@ func main() {
 	} else if *args.proxyPort <= 0 || *args.proxyPort > 65535 {
 		log.Errorf("Must provide a valid Shadowsocks proxy port [1:65535]")
 		os.Exit(oss.IllegalConfiguration)
-	} else if *args.proxyPassword == "" {
+	}
+	/*else if *args.proxyPassword == "" {
 		log.Errorf("Must provide a Shadowsocks proxy password")
 		os.Exit(oss.IllegalConfiguration)
 	} else if *args.proxyCipher == "" {
 		log.Errorf("Must provide a Shadowsocks proxy encryption cipher")
 		os.Exit(oss.IllegalConfiguration)
-	}
+	}*/
 
-	if *args.checkConnectivity {
+	/*if *args.checkConnectivity {
 		connErrCode, err := oss.CheckConnectivity(*args.proxyHost, *args.proxyPort, *args.proxyPassword, *args.proxyCipher)
 		log.Debugf("Connectivity checks error code: %v", connErrCode)
 		if err != nil {
 			log.Errorf("Failed to perform connectivity checks: %v", err)
 		}
 		os.Exit(connErrCode)
-	}
+	}*/
 
 	// Open TUN device
 	dnsResolvers := strings.Split(*args.tunDNS, ",")
@@ -115,16 +113,23 @@ func main() {
 	// Output packets to TUN device
 	core.RegisterOutputFn(tunDevice.Write)
 
+	proxyAddr, err := net.ResolveTCPAddr("tcp", *args.proxyHost)
+	if err != nil {
+		log.Fatalf("invalid proxy server address: %v", err)
+	}
+	proxyHost := proxyAddr.IP.String()
+	proxyPort := uint16(proxyAddr.Port)
+
 	// Register TCP and UDP connection handlers
 	core.RegisterTCPConnHandler(
-		shadowsocks.NewTCPHandler(*args.proxyHost, *args.proxyPort, *args.proxyPassword, *args.proxyCipher))
+		socks.NewTCPHandler(proxyHost, proxyPort))
 	if *args.dnsFallback {
 		// UDP connectivity not supported, fall back to DNS over TCP.
 		log.Debugf("Registering DNS fallback UDP handler")
 		core.RegisterUDPConnHandler(dnsfallback.NewUDPHandler())
 	} else {
 		core.RegisterUDPConnHandler(
-			shadowsocks.NewUDPHandler(*args.proxyHost, *args.proxyPort, *args.proxyPassword, *args.proxyCipher, udpTimeout))
+			socks.NewUDPHandler(proxyHost, proxyPort, udpTimeout))
 	}
 
 	// Configure LWIP stack to receive input data from the TUN device
